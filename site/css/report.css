@@ -90,6 +90,8 @@ body.report { background: #dfe7e5; -webkit-print-color-adjust: exact; print-colo
 .cert-kicker { font-family: var(--head); font-weight: 800; font-size: 30pt; color: var(--green); letter-spacing: .02em; margin: 0 0 .1in; }
 .cert-small { font-size: 12pt; color: var(--muted); margin: 0 0 .1in; text-transform: uppercase; letter-spacing: .14em; }
 .cert-name { font-family: var(--head); font-weight: 800; font-size: 46pt; color: var(--teal); margin: .05in 0 .12in; padding: 0 .4in .06in; border-bottom: 2px solid var(--gold); min-width: 5in; }
+.cert-name.long { font-size: 36pt; }
+.cert-name.xlong { font-size: 28pt; }
 .cert-body { font-size: 14pt; line-height: 1.5; color: var(--ink); margin: 0 0 .3in; }
 .cert-seal { position: absolute; right: .55in; top: .55in; width: 1.15in; height: 1.15in; border-radius: 50%; background: var(--sun); box-shadow: 0 0 0 5px #fff, 0 0 0 7px var(--gold);
   display: flex; align-items: center; justify-content: center; transform: rotate(-12deg); }

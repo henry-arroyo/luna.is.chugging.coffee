@@ -1,10 +1,12 @@
 // Local stand-in for AWS AppSync Events, implementing the documented WebSocket protocol:
 // subprotocol auth (aws-appsync-event-ws + header-<base64url>), connection_init/ack, ka,
-// subscribe/subscribe_success, publish/publish_success, data. Runs the REAL onPublish handler
-// code extracted from the synthesized CloudFormation template. Also serves ../site statically.
+// subscribe/subscribe_success, publish/publish_success, data. Runs the REAL onPublish handler code
+// and each namespace's publish/subscribe auth modes from the synthesized CloudFormation template,
+// and the REAL host-password check from infra/lambda. Also serves ../site statically.
 //
 //   node mock-appsync.js [port]
 //   Player: http://localhost:8787/        Host: http://localhost:8787/host.html
+//   Host password: "rehearsal" (or set HOST_PASSWORD)
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -16,19 +18,49 @@ const API_KEY = 'da2-localtestkey000000000000';
 const HOST = `localhost:${PORT}`;
 const SITE = path.join(__dirname, '..', 'site');
 const KA_MS = Number(process.env.KA_MS || 60000);
+const HOST_PASSWORD = process.env.HOST_PASSWORD || 'rehearsal';
 
-// Load the real handler from the synthesized template (falls back to pass-through).
-let onPublish = (ctx) => ctx.events;
+// The real authorizer, fed a hash of the rehearsal password instead of reading SSM.
+const { hashPassword, makeHandler } = require('../infra/lambda/auth-core');
+const PW_HASH = hashPassword(HOST_PASSWORD);
+const hostAuthorizer = makeHandler(async () => PW_HASH, { log: () => {} });
+const authCache = new Map(); // token -> allowed until (AppSync caches a "yes" for the authorizer's ttlOverride)
+
+// Namespaces from the synthesized template: name -> { onPublish, publish: [modes], subscribe: [modes] }.
+const namespaces = {};
 try {
   const tpl = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'infra', 'cdk.out', 'SocuGame-Game.template.json')));
-  const ns = Object.values(tpl.Resources).find((r) => r.Type === 'AWS::AppSync::ChannelNamespace');
-  const code = ns.Properties.CodeHandlers.replace(/export function/g, 'function') + '\nthis.onPublish = onPublish;';
-  const sandbox = {};
-  vm.runInNewContext(code, sandbox);
-  onPublish = sandbox.onPublish;
-  console.log('[mock] using onPublish handler from synthesized template');
+  for (const r of Object.values(tpl.Resources).filter((x) => x.Type === 'AWS::AppSync::ChannelNamespace')) {
+    const p = r.Properties;
+    let onPublish = (ctx) => ctx.events;
+    if (p.CodeHandlers) {
+      const sandbox = {};
+      vm.runInNewContext(p.CodeHandlers.replace(/export function/g, 'function') + '\nthis.onPublish = onPublish;', sandbox);
+      onPublish = sandbox.onPublish;
+    }
+    const modes = (list) => (list || [{ AuthType: 'API_KEY' }]).map((m) => m.AuthType);
+    namespaces[p.Name] = { onPublish, publish: modes(p.PublishAuthModes), subscribe: modes(p.SubscribeAuthModes) };
+  }
+  console.log('[mock] namespaces from synthesized template:', Object.entries(namespaces).map(([n, c]) => `${n} (publish ${c.publish}, subscribe ${c.subscribe})`).join('; '));
 } catch (e) {
-  console.log('[mock] handler not loaded:', e.message);
+  console.log('[mock] template not loaded, run `npx cdk synth` in infra first:', e.message);
+  process.exit(1);
+}
+
+// AppSync accepts an operation if any of the namespace's auth modes accepts it.
+async function authorized(modes, auth, channel, operation) {
+  for (const mode of modes) {
+    if (mode === 'API_KEY' && auth?.['x-api-key'] === API_KEY) return true;
+    if (mode === 'AWS_LAMBDA' && typeof auth?.Authorization === 'string' && /^.{8,128}$/.test(auth.Authorization)) {
+      if ((authCache.get(auth.Authorization) || 0) > Date.now()) return true;
+      const r = await hostAuthorizer({ authorizationToken: auth.Authorization, requestContext: { operation, channel } });
+      if (r.isAuthorized) {
+        authCache.set(auth.Authorization, Date.now() + r.ttlOverride * 1000);
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json', '.webp': 'image/webp' };
@@ -38,7 +70,7 @@ const server = http.createServer((req, res) => {
     // Use whatever host the browser reached us on, so phones on the same Wi-Fi work too.
     const h = req.headers.host || HOST;
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    return res.end(JSON.stringify({ mode: 'appsync', realtimeUrl: `ws://${h}/event/realtime`, httpDomain: h, apiKey: API_KEY, namespace: 'game' }));
+    return res.end(JSON.stringify({ mode: 'appsync', realtimeUrl: `ws://${h}/event/realtime`, httpDomain: h, apiKey: API_KEY }));
   }
   let p = path.join(SITE, decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
   if (!p.startsWith(SITE) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); return res.end('not found'); }
@@ -67,13 +99,14 @@ const wss = new WebSocketServer({
 });
 
 const norm = (c) => '/' + c.replace(/^\/|\/$/g, '');
+const nsOf = (c) => namespaces[norm(c).split('/')[1]];
 const matches = (sub, ch) => sub === ch || (sub.endsWith('/*') && ch.startsWith(sub.slice(0, -1)));
 
 wss.on('connection', (ws) => {
   stats.connects++;
   subs.set(ws, new Map());
   let ka = null;
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
     const err = (type, msg) => { stats.errors++; ws.send(JSON.stringify({ type, id: m.id, errors: [{ errorType: 'BadRequest', message: msg }] })); };
@@ -84,8 +117,8 @@ wss.on('connection', (ws) => {
     }
     if (m.type === 'subscribe') {
       if (!/^[a-zA-Z0-9-_+]{1,128}$/.test(m.id || '')) return err('subscribe_error', 'bad id');
-      if (!CHANNEL_RE.test(m.channel || '') || norm(m.channel).split('/')[1] !== 'game') return err('subscribe_error', 'bad channel');
-      if (m.authorization?.['x-api-key'] !== API_KEY) return err('subscribe_error', 'unauthorized');
+      if (!CHANNEL_RE.test(m.channel || '') || !nsOf(m.channel)) return err('subscribe_error', 'bad channel');
+      if (!(await authorized(nsOf(m.channel).subscribe, m.authorization, norm(m.channel), 'EVENT_SUBSCRIBE'))) return err('subscribe_error', 'unauthorized');
       if (subs.get(ws).has(m.id)) return err('subscribe_error', 'duplicate id');
       subs.get(ws).set(m.id, norm(m.channel));
       return ws.send(JSON.stringify({ type: 'subscribe_success', id: m.id }));
@@ -96,14 +129,14 @@ wss.on('connection', (ws) => {
     }
     if (m.type === 'publish') {
       if (!/^[a-zA-Z0-9-_+]{1,128}$/.test(m.id || '')) return err('publish_error', 'bad id');
-      if (m.authorization?.['x-api-key'] !== API_KEY) return err('publish_error', 'unauthorized');
-      if (!CHANNEL_RE.test(m.channel || '')) return err('publish_error', 'bad channel');
+      if (!CHANNEL_RE.test(m.channel || '') || !nsOf(m.channel)) return err('publish_error', 'bad channel');
+      if (!(await authorized(nsOf(m.channel).publish, m.authorization, norm(m.channel), 'EVENT_PUBLISH'))) return err('publish_error', 'unauthorized');
       if (!Array.isArray(m.events) || m.events.length < 1 || m.events.length > 5) return err('publish_error', '1-5 events');
       let parsed;
       try { parsed = m.events.map((e, i) => ({ id: String(i), payload: JSON.parse(e) })); } catch { return err('publish_error', 'events must be stringified JSON'); }
       const ch = norm(m.channel);
       const segments = ch.split('/').filter(Boolean);
-      const out = onPublish({ events: parsed, info: { channel: { path: ch, segments } } }) || [];
+      const out = nsOf(ch).onPublish({ events: parsed, info: { channel: { path: ch, segments } } }) || [];
       stats.publishes++;
       stats.dropped += parsed.length - out.length;
       for (const [cws, map] of subs) {
@@ -133,4 +166,4 @@ server.on('request', (req, res) => {
   orig(req, res);
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`[mock] http://${HOST}/  host: http://${HOST}/host.html`));
+server.listen(PORT, '0.0.0.0', () => console.log(`[mock] http://${HOST}/  host: http://${HOST}/host.html  (host password: ${HOST_PASSWORD})`));

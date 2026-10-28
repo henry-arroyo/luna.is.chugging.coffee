@@ -45,10 +45,10 @@ function renderJoin(msg = '') {
       <h1>SOCU Systems Training</h1>
       <form id="joinform" autocomplete="off">
         <label>Game code<input id="code" maxlength="4" value="${esc(code)}" placeholder="ABCD" autocapitalize="characters" required></label>
-        <label>Your first name or nickname<input id="name" maxlength="16" value="${esc(me.name)}" placeholder="First name" required></label>
+        <label>Your first and last name<input id="name" maxlength="32" value="${esc(me.name)}" placeholder="First and last name" autocomplete="name" autocapitalize="words" required></label>
         <button class="primary block" type="submit">Join</button>
         ${msg ? `<p class="err">${esc(msg)}</p>` : ''}
-        <p class="fine">Use a first name or nickname only. Nothing you enter is saved after the session.</p>
+        <p class="fine">Use your real name. The winner's name goes on a certificate.</p>
       </form>
     </div>`;
   $('#joinform').onsubmit = (e) => {
@@ -56,7 +56,7 @@ function renderJoin(msg = '') {
     const c = $('#code').value.trim().toUpperCase().replace(/[^A-Z]/g, '');
     const n = cleanName($('#name').value);
     if (c.length !== 4) return renderJoin('Game codes are 4 letters.');
-    if (!n) return renderJoin('Enter a name.');
+    if (!n) return renderJoin('Enter your first and last name.');
     join(c, n);
   };
 }

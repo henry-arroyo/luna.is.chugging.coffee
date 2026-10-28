@@ -1,7 +1,10 @@
 // Real-time transport.
 //  - AppSyncTransport: AWS AppSync Events WebSocket protocol (connect, subscribe, publish over one socket).
 //  - LocalTransport:   BroadcastChannel between tabs on one machine, for rehearsal with ?local=1.
-// Both expose: subscribe(channel, onEvent, onReady) · publish(channel, obj) · onStatus(fn) · reconnectNow()
+// Both expose: subscribe(channel, onEvent, onReady, onError) · publish(channel, obj) · onStatus(fn) · reconnectNow() · close()
+//
+// Everyone connects with the public API key. The TV also passes cfg.hostToken (the host password),
+// which AppSync's Lambda authorizer checks on each of its subscribes and publishes.
 
 export async function loadConfig() {
   const qs = new URLSearchParams(location.search);
@@ -52,7 +55,8 @@ export class AppSyncTransport extends StatusMixin {
   constructor(cfg) {
     super();
     this.cfg = cfg;
-    this.subs = new Map(); // id -> { channel, onEvent, onReady }
+    this.closed = false;
+    this.subs = new Map(); // id -> { channel, onEvent, onReady, onError }
     this.queue = [];
     this.ws = null;
     this.ready = false;
@@ -69,7 +73,7 @@ export class AppSyncTransport extends StatusMixin {
     window.addEventListener('online', wake);
     window.addEventListener('pageshow', wake);
     // Watchdog: phones can leave a socket "open" but dead after sleeping.
-    setInterval(() => {
+    this.watchdog = setInterval(() => {
       if (this.ready && Date.now() - this.lastMsg > this.kaTimeoutMs + 10000) this.reconnectNow(true);
     }, 15000);
     this._connect();
@@ -79,11 +83,27 @@ export class AppSyncTransport extends StatusMixin {
     return this.cfg.realtimeUrl || `wss://${this.cfg.realtimeDomain}/event/realtime`;
   }
 
+  // Connection auth: always the API key.
   get auth() {
     return { host: this.cfg.httpDomain, 'x-api-key': this.cfg.apiKey };
   }
 
+  // Auth for each subscribe and publish: the host password if this is the TV, otherwise the API key.
+  get opAuth() {
+    return this.cfg.hostToken ? { host: this.cfg.httpDomain, Authorization: this.cfg.hostToken } : this.auth;
+  }
+
+  close() {
+    this.closed = true;
+    clearTimeout(this.retryTimer);
+    clearInterval(this.watchdog);
+    const ws = this.ws;
+    this.ws = null;
+    try { ws && ws.close(); } catch {}
+  }
+
   reconnectNow(force) {
+    if (this.closed) return;
     const dead = !this.ws || this.ws.readyState >= 2;
     if (force || dead) {
       clearTimeout(this.retryTimer);
@@ -118,6 +138,7 @@ export class AppSyncTransport extends StatusMixin {
   }
 
   _retry() {
+    if (this.closed) return;
     clearTimeout(this.retryTimer);
     const cap = Math.min(8000, 400 * 2 ** Math.min(this.attempt, 5));
     this.attempt++;
@@ -156,7 +177,14 @@ export class AppSyncTransport extends StatusMixin {
       }
       case 'ka':
         break;
-      case 'subscribe_error':
+      case 'subscribe_error': {
+        // Not retried: the usual cause is a wrong host password, and retrying won't fix that.
+        const s = this.subs.get(m.id);
+        this.subs.delete(m.id);
+        console.warn('[appsync]', m);
+        if (s && s.onError) s.onError(m);
+        break;
+      }
       case 'publish_error':
       case 'broadcast_error':
       case 'connection_error':
@@ -167,7 +195,7 @@ export class AppSyncTransport extends StatusMixin {
   }
 
   _sendSub(id, s) {
-    this._send({ type: 'subscribe', id, channel: s.channel, authorization: this.auth });
+    this._send({ type: 'subscribe', id, channel: s.channel, authorization: this.opAuth });
   }
 
   _send(obj) {
@@ -179,9 +207,9 @@ export class AppSyncTransport extends StatusMixin {
     q.forEach((msg) => this._send(msg));
   }
 
-  subscribe(channel, onEvent, onReady) {
+  subscribe(channel, onEvent, onReady, onError) {
     const id = `s${rid()}`.slice(0, 40);
-    const s = { channel, onEvent, onReady };
+    const s = { channel, onEvent, onReady, onError };
     this.subs.set(id, s);
     if (this.ready) this._sendSub(id, s);
     return id;
@@ -193,7 +221,7 @@ export class AppSyncTransport extends StatusMixin {
       id: `p${rid()}`.slice(0, 40),
       channel,
       events: [JSON.stringify(obj)],
-      authorization: { 'x-api-key': this.cfg.apiKey },
+      authorization: this.opAuth,
     };
     if (this.ready && this.ws && this.ws.readyState === 1) this._send(msg);
     else {
@@ -210,6 +238,7 @@ export class LocalTransport extends StatusMixin {
     setTimeout(() => this._setStatus('online'), 0);
   }
   reconnectNow() {}
+  close() {}
   subscribe(channel, onEvent, onReady) {
     const bc = new BroadcastChannel(`socu:${channel}`);
     bc.onmessage = (ev) => onEvent(ev.data);

@@ -119,7 +119,7 @@ function broadcast(now = false) {
     clearTimeout(bTimer);
     bTimer = null;
     S.v++;
-    T.publish(chDown(S.code), { t: 'state', v: S.v, s: publicState() });
+    if (T) T.publish(chDown(S.code), { t: 'state', v: S.v, s: publicState() });
     store(KEY, S);
   };
   if (now) go();
@@ -711,9 +711,82 @@ let subscribedCode = null;
 function startChannels() {
   if (subscribedCode !== S.code) {
     subscribedCode = S.code;
-    T.subscribe(chUp(S.code), onUp, () => broadcast(true));
+    T.subscribe(chUp(S.code), onUp, () => broadcast(true), lockOut);
   }
   broadcast(true);
+}
+
+// The host password is checked by AWS, not here: AppSync only lets the TV read the phones' channel and
+// publish broadcasts if its Lambda authorizer accepts the password. This page just asks for it, and keeps
+// it in sessionStorage so a refresh in the same tab doesn't ask again (closing the tab forgets it).
+const TOKEN_KEY = 'socu-host-token';
+function tokenStore(val) {
+  try {
+    if (val === undefined) return sessionStorage.getItem(TOKEN_KEY);
+    if (val === null) sessionStorage.removeItem(TOKEN_KEY);
+    else sessionStorage.setItem(TOKEN_KEY, val);
+  } catch {
+    return null;
+  }
+}
+
+function renderLogin(msg = '') {
+  $('#tabs').innerHTML = '';
+  $('#side').innerHTML = '';
+  $('#controls').innerHTML = '';
+  $('#stage').innerHTML = `<form id="login" class="center-msg login" autocomplete="off">
+      <h1>Host sign-in</h1>
+      <p>Enter the host password to run the game.</p>
+      <input id="pw" type="password" autocomplete="current-password" minlength="8" maxlength="128" required autofocus aria-label="Host password">
+      <button class="primary" type="submit">Unlock</button>
+      ${msg ? `<p class="err">${esc(msg)}</p>` : ''}
+    </form>`;
+  $('#login').onsubmit = (e) => {
+    e.preventDefault();
+    const pw = $('#pw').value;
+    $('#stage').innerHTML = `<div class="center-msg"><p>Checking…</p></div>`;
+    unlock(pw);
+  };
+}
+
+function lockOut() {
+  tokenStore(null);
+  if (T) T.close();
+  T = null;
+  subscribedCode = null;
+  renderLogin('That password didn’t work.');
+}
+
+function unlock(token) {
+  const t = createTransport(token ? { ...cfg, hostToken: token } : cfg);
+  let unlocked = false;
+  t.subscribe(chUp(S.code), onUp, () => {
+    if (unlocked) return broadcast(true); // resubscribed after a reconnect
+    unlocked = true;
+    if (token) tokenStore(token);
+    T = t;
+    subscribedCode = S.code;
+    begin();
+  }, () => {
+    t.close();
+    if (unlocked) return lockOut();
+    tokenStore(null);
+    renderLogin('That password didn’t work.');
+  });
+}
+
+let begun = false;
+function begin() {
+  T.onStatus((s) => ($('#net').dataset.status = s));
+  startChannels();
+  if (begun) return;
+  begun = true;
+  document.addEventListener('click', onClick);
+  document.addEventListener('change', onChange);
+  // Safety net: rebroadcast periodically so late or reconnected phones always converge.
+  setInterval(() => S && T && T.publish(chDown(S.code), { t: 'state', v: ++S.v, s: publicState() }), 8000);
+  setInterval(() => T && renderSide(), 5000);
+  window.__socuHost = { get state() { return S; } }; // test hook
 }
 
 async function boot() {
@@ -722,21 +795,14 @@ async function boot() {
     $('#stage').innerHTML = `<div class="center-msg"><h1>Game is offline</h1><p>The real-time service isn't deployed right now. Deploy the Game stack, then refresh.</p></div>`;
     return;
   }
-  T = createTransport(cfg);
-  const net = $('#net');
-  T.onStatus((s) => (net.dataset.status = s));
-
   const saved = store(KEY);
   const fresh = saved && Date.now() - saved.created < 12 * 3600 * 1000;
   S = fresh ? saved : freshState(newCode());
   S.answers ||= []; // sessions saved before the answer log existed
-  document.addEventListener('click', onClick);
-  document.addEventListener('change', onChange);
-  startChannels();
-  // Safety net: rebroadcast periodically so late or reconnected phones always converge.
-  setInterval(() => S && T.publish(chDown(S.code), { t: 'state', v: ++S.v, s: publicState() }), 8000);
-  setInterval(() => renderSide(), 5000);
-  window.__socuHost = { get state() { return S; } }; // test hook
+  if (cfg.mode === 'local') return unlock(null); // ?local=1 rehearsal: tabs on one machine, no AWS
+  const token = tokenStore();
+  if (token) unlock(token);
+  else renderLogin();
 }
 
 boot();

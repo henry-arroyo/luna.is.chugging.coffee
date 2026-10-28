@@ -131,6 +131,9 @@ body.host { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; ove
 .center-msg { max-width: 52em; margin: 2em auto; text-align: center; }
 .center-msg h1 { font-size: 3em; }
 .center-msg > p { font-size: 1.2em; color: var(--muted); }
+.login { display: flex; flex-direction: column; align-items: center; gap: .8em; }
+.login input { font: inherit; font-size: 1.4em; width: min(100%, 16em); padding: .6em .8em; border-radius: 12px; border: 2px solid var(--sage); background: #fff; color: var(--ink); text-align: center; }
+.login input:focus { outline: none; border-color: var(--leaf); }
 
 /* module 1 */
 .txhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 1em; }

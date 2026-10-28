@@ -14,8 +14,8 @@ Resources:
   # The most any role created by the SocuGame-* stacks can ever do, whatever its own policies say.
   # The execution policy below only lets CloudFormation create or change roles that carry this boundary,
   # so a stack can't mint an admin role (or one trusted by another account) and act through it.
-  # Covers the stacks' Lambda custom resources (site file copy, bucket auto-delete, log retention)
-  # and AppSync's logging role.
+  # Covers the stacks' Lambda custom resources (site file copy, bucket auto-delete, log retention),
+  # AppSync's logging role, and the host-password authorizer (which reads one SSM parameter).
   RoleBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -52,6 +52,10 @@ Resources:
             Resource:
               - !Sub arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/appsync/*
               - !Sub arn:aws:logs:us-east-1:${AWS::AccountId}:log-group:/aws/lambda/SocuGame-*
+          - Sid: HostPasswordHash
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/socugame/*
 
   # What CloudFormation itself may do when deploying the SocuGame-* stacks.
   # Passed to `cdk bootstrap --cloudformation-execution-policies`, replacing the default AdministratorAccess.
@@ -63,12 +67,50 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AppServices
+          # AppSync, CloudFront and ACM: full control only of resources tagged project=mcfcu-socu-training
+          # (CDK tags everything in the app), and creating them only with that tag. So a deploy can't
+          # change or delete another project's APIs, distributions or certificates in this account.
+          - Sid: ProjectResources
+            Effect: Allow
+            Action: [appsync:*, cloudfront:*, acm:*]
+            Resource:
+              - !Sub arn:aws:appsync:us-east-1:${AWS::AccountId}:apis/*
+              - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+              - !Sub arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/*
+            Condition:
+              StringEquals: { aws:ResourceTag/project: mcfcu-socu-training }
+          - Sid: CreateTagged
             Effect: Allow
             Action:
-              - acm:*
-              - appsync:*
-              - cloudfront:*
+              - appsync:CreateApi
+              - appsync:CreateChannelNamespace
+              - appsync:TagResource
+              - cloudfront:CreateDistribution
+              - cloudfront:TagResource
+              - acm:RequestCertificate
+              - acm:AddTagsToCertificate
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: us-east-1
+                aws:RequestTag/project: mcfcu-socu-training
+          # IAM can't scope these by tag or name: AppSync API keys, CloudFront origin access controls and
+          # response-headers policies. Plus read-only lookups.
+          - Sid: Untaggable
+            Effect: Allow
+            Action:
+              - appsync:CreateApiKey
+              - appsync:UpdateApiKey
+              - appsync:DeleteApiKey
+              - appsync:Get*
+              - appsync:List*
+              - cloudfront:*OriginAccessControl*
+              - cloudfront:*ResponseHeadersPolicy*
+              - cloudfront:Get*
+              - cloudfront:List*
+              - acm:Describe*
+              - acm:Get*
+              - acm:List*
             Resource: '*'
             Condition:
               StringEquals: { aws:RequestedRegion: us-east-1 }

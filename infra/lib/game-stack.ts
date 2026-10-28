@@ -1,6 +1,9 @@
+import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as appsync from 'aws-cdk-lib/aws-appsync';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
@@ -13,16 +16,14 @@ export interface GameStackProps extends cdk.StackProps {
 }
 
 /**
- * onPublish guard for the "game" namespace (APPSYNC_JS runtime).
- *  - Only /game/<CODE>/up and /game/<CODE>/down channels are accepted.
+ * onPublish guard for both namespaces (APPSYNC_JS runtime).
+ *  - Only /up/<CODE> and /down/<CODE> channels are accepted.
  *  - Each event must be an object with a string "t" (message type) and stay small.
  * Anything else is dropped rather than broadcast.
  */
 const HANDLER_CODE = `
 export function onPublish(ctx) {
-  const segs = ctx.info.channel.segments;
-  const last = segs[segs.length - 1];
-  if (last !== 'up' && last !== 'down') {
+  if (ctx.info.channel.segments.length !== 2) {
     return [];
   }
   return ctx.events.filter((e) => {
@@ -38,11 +39,34 @@ export function onPublish(ctx) {
 /**
  * Real-time layer. Destroy this stack between sessions:
  * it removes the API, invalidates the key, and deletes /runtime/config.json.
+ *
+ * Two namespaces with opposite rules, so the public API key can't stand in for the TV:
+ *   /up/<CODE>    phones -> TV. Publish: API key. Subscribe: host password only.
+ *   /down/<CODE>  TV -> phones. Publish: host password only. Subscribe: API key.
+ * The host password is checked by a Lambda authorizer against a hash in SSM Parameter Store
+ * (set with access/set-host-password.sh; it lives outside every stack).
  */
 export class GameStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: GameStackProps) {
     super(scope, id, props);
 
+    const hashParam: string = this.node.tryGetContext('hostPasswordParam') ?? '/socugame/host-password-hash';
+    const hostAuth = new lambda.Function(this, 'HostAuth', {
+      description: 'SOCU game: checks the host (TV) password for AppSync Events',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: 'host-auth.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
+      memorySize: 256, // scrypt is CPU-bound; more memory means more CPU
+      timeout: cdk.Duration.seconds(5),
+      environment: { HASH_PARAM: hashParam },
+    });
+    hostAuth.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [this.formatArn({ service: 'ssm', resource: 'parameter', resourceName: hashParam.replace(/^\//, '') })],
+    }));
+
+    const KEY = appsync.AppSyncAuthorizationType.API_KEY;
+    const HOST = appsync.AppSyncAuthorizationType.LAMBDA;
     const api = new appsync.EventApi(this, 'EventApi', {
       apiName: 'mcfcu-socu-game',
       authorizationConfig: {
@@ -54,7 +78,19 @@ export class GameStack extends cdk.Stack {
               expires: cdk.Expiration.after(cdk.Duration.hours(props.apiKeyHours)),
             },
           },
+          {
+            authorizationType: HOST,
+            lambdaAuthorizerConfig: {
+              handler: hostAuth,
+              resultsCacheTtl: cdk.Duration.minutes(5),
+              validationRegex: '^.{8,128}$',
+            },
+          },
         ],
+        // Everyone connects with the API key; the password is only checked on the host's own operations.
+        connectionAuthModeTypes: [KEY],
+        defaultPublishAuthModeTypes: [KEY],
+        defaultSubscribeAuthModeTypes: [KEY],
       },
       logConfig: {
         fieldLogLevel: appsync.AppSyncFieldLogLevel.ERROR,
@@ -62,13 +98,17 @@ export class GameStack extends cdk.Stack {
       },
     });
 
-    // Escape hatch: `cdk deploy SocuGame-Game -c publishGuard=false` deploys the namespace
+    // Escape hatch: `cdk deploy SocuGame-Game -c publishGuard=false` deploys the namespaces
     // without the onPublish handler if the handler ever misbehaves.
     const guard = this.node.tryGetContext('publishGuard') !== 'false';
-    api.addChannelNamespace('game', {
-      channelNamespaceName: 'game',
-      ...(guard ? { code: appsync.Code.fromInline(HANDLER_CODE) } : {}),
-    });
+    const namespace = (name: string, publish: appsync.AppSyncAuthorizationType, subscribe: appsync.AppSyncAuthorizationType) =>
+      api.addChannelNamespace(name, {
+        channelNamespaceName: name,
+        authorizationConfig: { publishAuthModeTypes: [publish], subscribeAuthModeTypes: [subscribe] },
+        ...(guard ? { code: appsync.Code.fromInline(HANDLER_CODE) } : {}),
+      });
+    namespace('up', KEY, HOST);
+    namespace('down', HOST, KEY);
 
     const apiKey = api.apiKeys['Default'].attrApiKey;
     const expiresAt = new Date(Date.now() + props.apiKeyHours * 3600 * 1000).toISOString();
@@ -80,7 +120,6 @@ export class GameStack extends cdk.Stack {
           realtimeDomain: api.realtimeDns,
           httpDomain: api.httpDns,
           apiKey,
-          namespace: 'game',
           keyExpiresApprox: expiresAt,
         }),
       ],

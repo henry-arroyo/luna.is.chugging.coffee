@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8787"
 SHOTS = os.path.join(os.path.dirname(__file__), "shots")
 os.makedirs(SHOTS, exist_ok=True)
-NAMES = ["Kai", "Leilani", "Makoa", "Noe"]
+NAMES = ["Kai Akana", "Leilani Kamakawiwoʻole", "Makoa", "Noe"]  # one long real name, to check layouts
 random.seed(7)
 errors = []
 vulns = []  # attacks that got through (collected, so one run reports every hole)
@@ -20,6 +20,10 @@ def check(ok, msg):
 # Against the local mock, sockets are killed server-side via /__kill. Against a real deployment,
 # every page records its WebSockets and the test closes them abruptly (what a Wi-Fi drop looks like).
 MOCK = BASE.startswith("http://localhost") or BASE.startswith("http://127.")
+# The mock's host password is "rehearsal". Against a live deployment, pass the real one in HOST_PASSWORD.
+HOST_PASSWORD = os.environ.get("HOST_PASSWORD") or ("rehearsal" if MOCK else None)
+if not HOST_PASSWORD:
+    sys.exit("Set HOST_PASSWORD to the host password to test a live deployment.")
 TRACK_WS = """(() => { const W = window.WebSocket; window.__ws = [];
   window.WebSocket = function (...a) { const w = new W(...a); window.__ws.push(w); return w; };
   window.WebSocket.prototype = W.prototype; Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 }); })()"""
@@ -72,6 +76,14 @@ with sync_playwright() as pw:
     host = hostctx.new_page()
     host.on("pageerror", lambda e: errors.append(f"host: {e}"))
     host.goto(f"{BASE}/host.html")
+    host.wait_for_selector("#login")
+    shot(host, "00-host-login")
+    host.fill("#pw", "not-the-password")
+    host.locator("#login button").click()
+    host.wait_for_selector("#login .err")
+    assert host.evaluate("() => !window.__socuHost"), "host unlocked with a wrong password"
+    host.fill("#pw", HOST_PASSWORD)
+    host.locator("#login button").click()
     host.wait_for_function("() => window.__socuHost && window.__socuHost.state")
     code = hs(host)["code"]
     print("session code", code)
@@ -269,10 +281,17 @@ with sync_playwright() as pw:
     rogue.evaluate("""async (code) => {
       const t = await import('/js/transport.js');
       const c = await import('/js/common.js');
-      const T = t.createTransport(await t.loadConfig());
+      const cfg = await t.loadConfig();
+      const T = t.createTransport(cfg);
       await new Promise((r) => T.onStatus((st) => st === 'online' && r()));
-      window.__rogue = { up: (m) => T.publish(c.chUp(code), m), down: (m) => T.publish(c.chDown(code), m), newId: c.newId };
+      // Try to read the phones' channel (private ids travel on it): with the API key, then with a guessed password.
+      const tryRead = (tr) => new Promise((r) => tr.subscribe(c.chUp(code), () => (window.__rogue.heard += 1), () => r('subscribed'), () => r('refused')));
+      window.__rogue = { up: (m) => T.publish(c.chUp(code), m), down: (m) => T.publish(c.chDown(code), m), newId: c.newId, heard: 0 };
+      const guess = t.createTransport({ ...cfg, hostToken: 'password123' });
+      window.__rogue.read = { key: await tryRead(T), guess: await tryRead(guess) };
     }""", code)
+    reads = rogue.evaluate("() => window.__rogue.read")
+    check(reads == {"key": "refused", "guess": "refused"}, f"phones' channel readable without the host password: {reads}")
     member = rogue.evaluate("async () => (await import('/js/content.js')).LOOKUP_MEMBERS[0].id")
     audit_before = len(hs(host)["audit"])
 
@@ -326,6 +345,7 @@ with sync_playwright() as pw:
     print("players after a 70-join flood:", n)
     # AppSync drops part of a burst this fast from one connection, so live runs may not reach the cap.
     check(n == 60 if MOCK else n <= 60, f"join cap not enforced: {n} players")
+    check(rogue.evaluate("() => window.__rogue.heard") == 0, "rogue received phone messages")
     print("attacks that got through:", vulns or "none")
     if MOCK:
         print("stats:", urllib.request.urlopen(f"{BASE}/__stats").read().decode())

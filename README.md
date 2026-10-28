@@ -10,23 +10,30 @@ A real-time, phone-based game for the SOCU systems and data security session. Th
 ## Architecture
 
 ```
- Phones ──┐                                  ┌── TV (host.html)
+ Phones ──┐                                  ┌── TV (host.html, unlocked with the host password)
           │  wss  AppSync Events  wss        │   holds the authoritative game state
-          ├──►  /game/<CODE>/up   ───────────►│   validates every action
-          │◄──  /game/<CODE>/down ◄───────────┤   broadcasts versioned snapshots
+          ├──►  /up/<CODE>     ──────────────►│   validates every action
+          │◄──  /down/<CODE>   ◄──────────────┤   broadcasts versioned snapshots
           │                                  │
           └── HTTPS ── CloudFront (OAC) ── private S3 (static site + /runtime/config.json)
 ```
+
+| Channel | Publish | Subscribe |
+|---|---|---|
+| `/up/<CODE>` (phones → TV) | API key | Host password only |
+| `/down/<CODE>` (TV → phones) | Host password only | API key |
+
+The host password is checked by a Lambda authorizer against a salted hash in SSM Parameter Store, so only the TV can broadcast or read what phones send.
 
 | Stack | Lifetime | Contents |
 |---|---|---|
 | `SocuGame-Cert` | Persistent | ACM certificate for `luna.is.chugging.coffee` (us-east-1, DNS validated in Cloudflare) |
 | `SocuGame-Site` | Persistent | Private S3 bucket, CloudFront with Origin Access Control, security headers (CSP, HSTS, frame-deny, no-referrer) |
-| `SocuGame-Game` | **Ephemeral** | AppSync Events API, `game` channel namespace with an `onPublish` guard, API key (72 h), `runtime/config.json` |
+| `SocuGame-Game` | **Ephemeral** | AppSync Events API, `up` and `down` channel namespaces with an `onPublish` guard, API key (72 h), host-password Lambda authorizer, `runtime/config.json` |
 
 Everything is in **us-east-1**, because CloudFront requires its certificate there and one region avoids cross-region references.
 
-**Why the TV is the referee:** phones only send intents ("I picked option B"). The TV checks the move, applies it, and broadcasts the whole public state with a version number. Phones render whatever the newest version says. There's no database and no Lambda, and all game rules live in one place.
+**Why the TV is the referee:** phones only send intents ("I picked option B"). The TV checks the move, applies it, and broadcasts the whole public state with a version number. Phones render whatever the newest version says. There's no database, and all game rules live in one place. The only Lambda is the password check.
 
 **Resilience:**
 - Phones reconnect automatically: after a screen lock, a Wi-Fi drop, or switching apps. They resubscribe, say hello, and the TV rebroadcasts.
@@ -53,8 +60,8 @@ That script deploys `socu-claude-access` ([access/deployer-access.yaml](infra/ac
 | Created | Purpose |
 |---|---|
 | Role `socu-claude-deployer` | Assumed for deploys. Can only assume the `cdk-socugame-*` bootstrap roles, plus read-only status checks. |
-| Policy `socu-cdk-execution` | What CloudFormation may do: us-east-1 only; S3 `socugame-*`, CloudFront, ACM, AppSync, Lambda `SocuGame-*`, the project's own log groups; IAM only on `SocuGame-*` roles, and only roles that carry the boundary below. |
-| Policy `socu-role-boundary` | Permissions boundary on every role the stacks create (set through `cdk.json`). Caps them at the site bucket, CloudFront invalidations and the project's log groups, so a stack can't create an admin role or one another account can assume. |
+| Policy `socu-cdk-execution` | What CloudFormation may do: us-east-1 only; S3 `socugame-*`; AppSync APIs, CloudFront distributions and ACM certificates only if tagged `project=mcfcu-socu-training` (and created only with that tag); Lambda `SocuGame-*`; the project's own log groups; IAM only on `SocuGame-*` roles, and only roles that carry the boundary below. |
+| Policy `socu-role-boundary` | Permissions boundary on every role the stacks create (set through `cdk.json`). Caps them at the site bucket, CloudFront invalidations, the project's log groups and the host-password parameter, so a stack can't create an admin role or one another account can assume. |
 | Stack `CDKToolkit-socugame` | CDK bootstrap, using the policy above instead of AdministratorAccess. |
 
 Every deploy command below runs through the deployer role:
@@ -62,6 +69,14 @@ Every deploy command below runs through the deployer role:
 ```bash
 access/as-deployer.sh npm run deploy:cert
 ```
+
+Then set the host password, which the TV asks for before it will run a game:
+
+```bash
+access/set-host-password.sh
+```
+
+It stores only a salted hash, at `/socugame/host-password-hash` in SSM Parameter Store. That parameter isn't part of any stack, so it survives teardowns. Run the script again any time to change the password; the change applies within about 5 minutes, with no redeploy.
 
 Cut access early with `aws logout --profile socu-admin`. To remove the access setup entirely after the session: delete the `CDKToolkit-socugame` stack, then `socu-claude-access` (empty the `cdk-socugame-assets-*` bucket first if the delete stalls).
 
@@ -116,7 +131,7 @@ This takes about a minute. The output shows the API key's approximate expiry, wh
 
 ### 4. Test
 
-1. On your laptop, open `https://luna.is.chugging.coffee/host.html`.
+1. On your laptop, open `https://luna.is.chugging.coffee/host.html` and enter the host password.
 2. Scan the QR code with your phone, plus a second device if you have one.
 3. Click through one transaction, one scenario, and a few emails.
 4. Lock the phone for 30 seconds, then unlock it. It should catch back up on its own.
@@ -137,7 +152,7 @@ This deletes the API and invalidates the key. The site stays up and shows **"Gam
 cd infra && npm run deploy:game
 ```
 
-That creates a new API and a fresh 72-hour key. Then open `host.html` on the conference room computer and test with your phone **from the conference room**. Branch guest Wi-Fi can block WebSockets. If it does, have students use cellular data.
+That creates a new API and a fresh 72-hour key. Then open `host.html` on your computer, enter the host password, and put the browser window on the TV. Test with your phone **from the conference room**. Branch guest Wi-Fi can block WebSockets. If it does, have students use cellular data.
 
 After the session: `npm run destroy:game`.
 
@@ -149,7 +164,7 @@ After the session: `npm run destroy:game`.
 
 | Module | What you do |
 |---|---|
-| **Lobby** | Students scan the QR code. Seats (Member / Front door / Network / Core) assign automatically. **Shuffle seats** if you want. Toggle **Member Lookup** on if you're running the honeypot. |
+| **Lobby** | Students scan the QR code and enter their first and last name (the winner's name goes on the certificate). Seats (Member / Front door / Network / Core) assign automatically. **Shuffle seats** if you want. Toggle **Member Lookup** on if you're running the honeypot. |
 | **1 · Route It** | Click **Start transaction 1**. The phone holding the active seat gets the decision; everyone else sees where the transaction is. Wrong answers show feedback on the TV and that phone, and the student retries for no points. Use **Next transaction ▶** to advance. Transaction 5 cuts the branch connection, which sets up Module 2. |
 | **2 · Help Desk** | **Start scenario** → students lock in → **Reveal**. The room's most popular answer decides the next step, and ties go to the better answer. **Click any answer bar to override** before **Continue** if you want to steer the story. |
 | **3 · The Inbox** | **Open the inbox.** The TV grid shows progress only (●), not answers. **Reveal answers** scores all 10 emails (+100 per correct call, −50 per phishing link clicked), then step through each email with its clues. |
@@ -168,26 +183,27 @@ You can jump to any module from the top tabs at any time. The × next to a playe
 cd test && npm i && npm run mock    # local AppSync Events stand-in on :8787
 ```
 
-- Host: `http://localhost:8787/host.html`
+- Host: `http://localhost:8787/host.html` (password `rehearsal`, or set `HOST_PASSWORD` before `npm run mock`)
 - Phones on the same Wi-Fi: `http://<your-laptop-LAN-IP>:8787/`
 - Single machine, no server at all: serve `site/` with any static server and add `?local=1` to both URLs (tabs talk over BroadcastChannel).
 
-The mock implements the documented AppSync Events WebSocket protocol and runs the **actual** `onPublish` handler code extracted from the synthesized template. `npm run e2e` drives a TV and four phones through every module, including killing every socket mid-game. The test requires Python Playwright.
+The mock implements the documented AppSync Events WebSocket protocol. From the synthesized template it takes the **actual** `onPublish` handler code and each namespace's publish and subscribe rules, and it checks the host password with the authorizer's own code (`infra/lambda/auth-core.js`). `npm run e2e` drives a TV and four phones through every module, including killing every socket mid-game, then runs the attacks listed under Security notes. The test requires Python Playwright. Against a live deployment, pass the host password: `HOST_PASSWORD=… python3 e2e.py https://luna.is.chugging.coffee`.
 
 ---
 
 ## Security notes
 
-- **The API key is public by design.** It sits in `config.json` so phones can connect. Anyone with it can publish on a game's channels, so neither side trusts the other blindly. They could not reach anything else, and no member data exists anywhere in this system. Mitigations:
-  - Each phone has a private id, which the TV accepts actions from, and a separate public id, which is how the phone appears in broadcasts. Private ids never leave the TV, so nobody can answer or log a lookup as a classmate.
-  - Phones only render a broadcast whose fields are the right types and point at real content, and never insert any of it as HTML. A forged broadcast can't add links or markup to a phone.
+- **The API key is public by design.** It sits in `config.json` so phones can connect. With it, someone can send phone messages and read TV broadcasts, and nothing else: no member data exists anywhere in this system. Mitigations:
+  - **Only the TV can broadcast, and only the TV can read what phones send.** AWS enforces both with the host password (see Architecture), so a student with dev tools can't fake a TV broadcast or see other phones' messages.
+  - The host page's code is public, but it does nothing without the password. The password is never in the page or the repo: the TV keeps it in its tab's session storage (closing the tab forgets it), and AWS stores only a salted scrypt hash.
+  - Each phone has a private id, which the TV accepts actions from, and a separate public id, which is how the phone appears in broadcasts. Private ids travel only on the channel the TV alone can read, so nobody can answer or log a lookup as a classmate.
+  - Phones still only render a broadcast whose fields are the right types and point at real content, and never insert any of it as HTML.
   - The audit log is never broadcast. Phones don't need it, and it carries real names even with **Anonymize** on.
   - The TV caps a game at 60 players and coalesces broadcasts, so floods of joins or heartbeats can't swamp it.
-  - What's left: a well-formed forged broadcast with a high version number can put phones on the wrong screen or stop them updating until they refresh. Preventing that would need the TV to sign its broadcasts.
   - The key expires in 72 hours, and you destroy the stack after each session.
   - Channels are scoped per 4-letter session code.
-  - The `onPublish` handler drops anything that isn't a small, well-formed game message on `/game/<code>/up|down`.
-- **Students' data:** first name or nickname only. Nothing is stored server-side; AppSync Events relays and forgets. Game state lives only in the TV's browser.
+  - The `onPublish` handler drops anything that isn't a small, well-formed game message on `/up/<code>` or `/down/<code>`.
+- **Students' data:** students enter their real first and last name, because the winner's name goes on a certificate. Nothing is stored server-side; AppSync Events relays and forgets. Names live in the TV's browser and in the session report you save.
 - **No third-party requests from students' phones:** fonts, QR code and logos are self-hosted. CSP allows only this site and AppSync in us-east-1.
 - **All content is fictional:** members, balances, card numbers and phishing domains.
 
@@ -206,7 +222,7 @@ All transactions, scenarios, emails, and Member Lookup records are in `site/js/c
 ## Layout
 
 ```
-infra/   CDK app (bin/app.ts, lib/*-stack.ts)
+infra/   CDK app (bin/app.ts, lib/*-stack.ts), lambda/ (host-password authorizer), access/ (deploy access, host password)
 site/    static site: index.html (phones), host.html (TV), js/, css/, img/, fonts/
 test/    mock-appsync.js (local AppSync Events), e2e.py (Playwright end-to-end)
 ```

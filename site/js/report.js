@@ -172,12 +172,14 @@ function certificates(ranked) {
   const winners = ranked.filter((p) => p.rank === 1 && p.score > 0);
   if (!winners.length) return certOnly ? '<p class="r-empty">No scores yet, so there is no winner to certify.</p>' : '';
   const tie = winners.length > 1;
+  // Full names run up to 32 characters; step the type down so long ones stay on one line.
+  const size = (name) => (name.length > 24 ? 'xlong' : name.length > 16 ? 'long' : '');
   return winners.map((p) => `<section class="cert">
       <div class="cert-frame">
         <img src="/img/logo-full.png" alt="Maui County Federal Credit Union" class="cert-logo">
         <p class="cert-kicker">Certificate of Achievement</p>
         <p class="cert-small">This certificate is proudly presented to</p>
-        <h1 class="cert-name">${esc(S.players[p.pid].name)}</h1>
+        <h1 class="cert-name ${size(S.players[p.pid].name)}">${esc(S.players[p.pid].name)}</h1>
         <p class="cert-body">for earning the ${tie ? 'shared ' : ''}top score of <b>${p.score} points</b> in the<br>Student-Operated Credit Union Systems &amp; Data Security Training</p>
         <div class="cert-seal"><span>Top<br>Score</span></div>
         <div class="cert-sign">

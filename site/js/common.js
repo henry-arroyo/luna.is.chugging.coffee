@@ -35,14 +35,18 @@ export function shuffled(seed, arr) {
   return a;
 }
 
-export const chUp = (code) => `/game/${code}/up`;
-export const chDown = (code) => `/game/${code}/down`;
+// Two AppSync namespaces with opposite rules (see infra/lib/game-stack.ts):
+// phones publish on up and only the TV (with the host password) can read it;
+// only the TV can publish on down, and anyone can read it.
+export const chUp = (code) => `/up/${code}`;
+export const chDown = (code) => `/down/${code}`;
 
 export function cleanName(s) {
   return String(s || '')
     .replace(/[^\p{L}\p{N} '.\-ʻ]/gu, '')
     .trim()
-    .slice(0, 16);
+    .replace(/\s+/g, ' ')
+    .slice(0, 32);
 }
 
 export function fmtTime(ts) {
