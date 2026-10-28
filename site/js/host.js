@@ -2,7 +2,7 @@
 // and broadcasts a versioned public snapshot. Phones only send intents.
 import { TRANSACTIONS, SCENARIOS, EMAILS, LOOKUP_MEMBERS, SEATS, SEAT_ICON, METHOD } from './content.js';
 import { loadConfig, createTransport } from './transport.js';
-import { esc, $, newCode, chUp, chDown, fmtTime, store, cleanName } from './common.js';
+import { esc, $, newCode, chUp, chDown, fmtTime, store, cleanName, shuffled } from './common.js';
 import qrcode from './qrcode.mjs';
 
 const PHASES = [
@@ -36,6 +36,7 @@ function freshState(code) {
     m2: { scIdx: 0, node: null, round: 0, status: 'idle', votes: {}, reveal: null, path: [], done: [] },
     m3: { status: 'idle', marks: {}, clicks: {}, revealIdx: 0, scored: false },
     audit: [],
+    answers: [], // every answer, right or wrong, for the session report
   };
 }
 
@@ -59,7 +60,12 @@ function addPoints(pid, pts, mod) {
 }
 
 function audit(pid, kind, action, detail) {
-  S.audit.push({ ts: Date.now(), pid, kind, action, detail: detail || '' });
+  S.audit.push({ ts: Date.now(), pid, name: P(pid)?.name, kind, action, detail: detail || '' });
+}
+
+// result: 'correct' | 'partial' | 'wrong' | 'missed'. The name is kept so removed players still show in the report.
+function logAnswer(pid, mod, item, question, choice, result, pts) {
+  S.answers.push({ ts: Date.now(), pid, name: P(pid)?.name, mod, item, question, choice, result, pts });
 }
 
 // ───────────────────────── broadcast ─────────────────────────
@@ -190,6 +196,9 @@ function m1Answer(pid, a) {
   }
 
   m.feedback = { pid, step: m.step, opt: o.id, ok: !!o.ok, at: Date.now() };
+  const firstTry = !m.tried[m.step];
+  logAnswer(pid, 'm1', `T${m.txIdx + 1} · ${tx.labels[st.seat]}`, st.prompt, o.label,
+    o.ok ? (firstTry ? 'correct' : 'partial') : 'wrong', o.ok && firstTry ? 100 : 0);
   if (!o.ok) {
     m.tried[m.step] = true;
     return broadcast();
@@ -230,12 +239,15 @@ function m2Reveal() {
   const counts = {};
   const pts = {};
   node.options.forEach((o) => (counts[o.id] = 0));
+  const sc = SCENARIOS[m.scIdx];
   for (const [pid, opt] of Object.entries(m.votes)) {
     counts[opt]++;
     const o = node.options.find((x) => x.id === opt);
     pts[pid] = o.pts;
     addPoints(pid, o.pts, 'm2');
+    logAnswer(pid, 'm2', sc.title, node.text, o.label, o.pts >= 100 ? 'correct' : o.pts > 0 ? 'partial' : 'wrong', o.pts);
   }
+  S.order.filter((pid) => !m.votes[pid]).forEach((pid) => logAnswer(pid, 'm2', sc.title, node.text, '—', 'missed', 0));
   // The room's most popular answer decides the story. Ties go to the better answer.
   const ranked = [...node.options].sort((x, y) => counts[y.id] - counts[x.id] || y.pts - x.pts);
   m.reveal = { counts, pts, choice: ranked[0].id };
@@ -286,9 +298,18 @@ function m3Reveal() {
   if (!m.scored) {
     for (const pid of S.order) {
       const marks = m.marks[pid] || {};
-      EMAILS.forEach((e) => marks[e.id] === e.verdict && addPoints(pid, 100, 'm3'));
+      EMAILS.forEach((e, i) => {
+        const v = marks[e.id];
+        if (v === e.verdict) addPoints(pid, 100, 'm3');
+        const label = v ? (v === 'phish' ? 'Phish' : 'Legit') : '—';
+        logAnswer(pid, 'm3', `Email ${i + 1} · ${e.verdict === 'phish' ? 'Phish' : 'Legit'}`, e.subject, label,
+          !v ? 'missed' : v === e.verdict ? 'correct' : 'wrong', v === e.verdict ? 100 : 0);
+      });
       Object.keys(m.clicks[pid] || {}).forEach((id) => {
-        if (EMAILS.find((e) => e.id === id).verdict === 'phish') addPoints(pid, -50, 'm3');
+        const i = EMAILS.findIndex((e) => e.id === id);
+        if (EMAILS[i].verdict !== 'phish') return;
+        addPoints(pid, -50, 'm3');
+        logAnswer(pid, 'm3', `Email ${i + 1} · Phish`, EMAILS[i].subject, 'Clicked the link', 'wrong', -50);
       });
     }
     m.scored = true;
@@ -486,14 +507,15 @@ function rM2() {
     body = `<div class="scen"><p class="eyebrow">${sc.icon} ${esc(sc.title)} · how it played out</p><ol class="pathlist">${steps.join('')}</ol>${methodBar()}</div>`;
   } else {
     const node = sc.nodes[m.node];
+    const shown = shuffled(`${sc.id}:${m.node}`, node.options); // same order as the phones
     const voted = Object.keys(m.votes).length;
     let opts = '';
     if (m.status === 'voting') {
-      opts = `<div class="votegrid">${node.options.map((o, i) => `<div class="vopt"><span class="letter">${String.fromCharCode(65 + i)}</span>${esc(o.label)}</div>`).join('')}</div>
+      opts = `<div class="votegrid">${shown.map((o, i) => `<div class="vopt"><span class="letter">${String.fromCharCode(65 + i)}</span>${esc(o.label)}</div>`).join('')}</div>
         <div class="lockins">${S.order.map((pid) => `<span class="chip ${m.votes[pid] ? 'locked' : ''}">${m.votes[pid] ? '🔒 ' : ''}${nameOf(pid)}</span>`).join('')}</div>`;
     } else {
       const total = Math.max(1, voted);
-      opts = `<div class="results">${node.options.map((o, i) => {
+      opts = `<div class="results">${shown.map((o, i) => {
         const c = m.reveal.counts[o.id] || 0;
         const chosen = m.reveal.choice === o.id;
         const who = Object.entries(m.votes).filter(([, v]) => v === o.id).map(([pid]) => nameOf(pid)).join(', ');
@@ -522,7 +544,7 @@ function rM3() {
   let body = '';
   let controls = '';
   if (m.status === 'idle') {
-    body = `<div class="center-msg"><p class="eyebrow">Module 3</p><h1>The Inbox</h1><p>You're a teller. Eight emails just landed. Some are real. Some are trying to get your login. Inspect every sender and every link before you decide.</p>
+    body = `<div class="center-msg"><p class="eyebrow">Module 3</p><h1>The Inbox</h1><p>You're a teller. ${EMAILS.length} emails just landed. Some are real. Some are trying to get your login. Inspect every sender and every link before you decide.</p>
       <div class="rules"><span>🔍 Inspect = safe</span><span>👆 Click a phishing link = −50</span><span>✅ Correct call = +100</span></div></div>`;
     controls = `<button class="primary" data-act="m3open">Open the inbox ▶</button>`;
   } else if (m.status === 'open') {
@@ -595,6 +617,7 @@ function rAudit() {
     <div class="tablewrap"><table class="auditlog"><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Detail</th><th></th></tr></thead><tbody>${tr || '<tr><td colspan="5" class="muted">No activity logged yet.</td></tr>'}</tbody></table></div>
   </div>`;
   const controls = `<label class="toggle inline"><input type="checkbox" data-act="anon" ${S.settings.anonymize ? 'checked' : ''}><span></span> Anonymize</label>
+    <button class="ghost" data-act="report">📄 Session report</button>
     <button class="primary" data-act="phase" data-v="podium">Final standings ▶</button>`;
   return [stage, controls];
 }
@@ -605,7 +628,9 @@ function rPodium() {
   const podium = [1, 0, 2].filter((i) => top[i]).map((i) => `<div class="pod p${i + 1}"><b>${nameOf(top[i])}</b><span>${P(top[i]).score}</span><div class="block">${i + 1}</div></div>`).join('');
   const rest = ranked.slice(3).map((pid, i) => `<li><span>${i + 4}. ${nameOf(pid)}</span><b>${P(pid).score}</b></li>`).join('');
   const stage = `<div class="podium-wrap"><p class="eyebrow">Final standings</p><h1>Mahalo for playing!</h1><div class="podium">${podium}</div>${rest ? `<ol class="ranklist">${rest}</ol>` : ''}</div>`;
-  return [stage, `<button class="ghost" data-act="phase" data-v="audit">◀ Audit log</button>`];
+  return [stage, `<button class="ghost" data-act="phase" data-v="audit">◀ Audit log</button>
+    <button class="ghost" data-act="report">📄 Session report</button>
+    <button class="primary" data-act="cert">🏆 Winner certificate</button>`];
 }
 
 // ───────────────────────── host controls ─────────────────────────
@@ -647,6 +672,12 @@ function onClick(ev) {
       S.order = S.order.filter((x) => x !== v);
       assignSeats();
       return broadcast();
+    case 'report':
+    case 'cert':
+      // The report page reads the saved session from this browser, so save the latest first.
+      store(KEY, S);
+      window.open(b.dataset.act === 'cert' ? '/report.html?view=cert' : '/report.html', '_blank');
+      return;
     case 'newsession':
       if (!confirm('Start a brand-new session? Current scores and the audit log will be cleared.')) return;
       S = freshState(newCode());
@@ -685,6 +716,7 @@ async function boot() {
   const saved = store(KEY);
   const fresh = saved && Date.now() - saved.created < 12 * 3600 * 1000;
   S = fresh ? saved : freshState(newCode());
+  S.answers ||= []; // sessions saved before the answer log existed
   document.addEventListener('click', onClick);
   document.addEventListener('change', onChange);
   startChannels();

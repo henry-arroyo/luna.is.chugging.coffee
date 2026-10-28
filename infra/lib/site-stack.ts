@@ -103,6 +103,8 @@ export class SiteStack extends cdk.Stack {
       destinationBucket: this.bucket,
       exclude: ['runtime/*'], // owned by the Game stack; don't prune it
       prune: true,
+      // Browsers revalidate on every load, so content edits never mix old and new JS on a phone.
+      cacheControl: [s3deploy.CacheControl.noCache()],
       distribution: this.distribution,
       distributionPaths: ['/*'],
       memoryLimit: 512,

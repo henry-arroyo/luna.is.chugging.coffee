@@ -1,7 +1,7 @@
 // PLAYER (phone). Renders the host's latest snapshot and sends intents. Never decides outcomes.
 import { TRANSACTIONS, SCENARIOS, EMAILS, LOOKUP_MEMBERS, SEAT_ICON } from './content.js';
 import { loadConfig, createTransport } from './transport.js';
-import { esc, $, newId, chUp, chDown, store, cleanName } from './common.js';
+import { esc, $, newId, chUp, chDown, store, cleanName, shuffled } from './common.js';
 
 const app = $('#app');
 let T = null;
@@ -172,7 +172,7 @@ function vM1() {
       <h2>Your move</h2><p class="prompt">${esc(st.prompt)}</p>
       ${st.info.length ? `<ul class="info">${st.info.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
       ${wrongOpt ? `<div class="fb bad"><b>Not quite.</b> ${esc(wrongOpt.fb)}<br><small>Try again.</small></div>` : ''}
-      <div class="opts">${st.options.map((o) => `<button class="opt ${myWrong && fb.opt === o.id ? 'wrong' : ''}" data-a="m1" data-v="${o.id}" ${pending ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div></div>`;
+      <div class="opts">${shuffled(`${tx.id}:${m.step}`, st.options).map((o) => `<button class="opt ${myWrong && fb.opt === o.id ? 'wrong' : ''}" data-a="m1" data-v="${o.id}" ${pending ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div></div>`;
   }
   const holder = S.players.find((x) => x.seats.includes(st.seat));
   return `${lastRight ? `<div class="fb ok">✓ Nice: ${esc(tx.steps[fb.step].options.find((o) => o.id === fb.opt).fb)}</div>` : ''}
@@ -191,7 +191,7 @@ function vM2() {
   const mine = L.votes[`${sc.id}:${m.node}:${m.round}`];
   if (m.status === 'voting') {
     return `<div class="card"><p class="eyebrow">${sc.icon} ${esc(sc.title)}</p><p class="prompt">${esc(node.text)}</p>
-      <div class="opts">${node.options.map((o, i) => `<button class="opt ${mine === o.id ? 'picked' : ''}" data-a="m2" data-v="${o.id}"><span class="letter">${String.fromCharCode(65 + i)}</span>${esc(o.label)}</button>`).join('')}</div>
+      <div class="opts">${shuffled(`${sc.id}:${m.node}`, node.options).map((o, i) => `<button class="opt ${mine === o.id ? 'picked' : ''}" data-a="m2" data-v="${o.id}"><span class="letter">${String.fromCharCode(65 + i)}</span>${esc(o.label)}</button>`).join('')}</div>
       <p class="muted center">${mine ? '🔒 Locked in. You can change it until the reveal.' : 'Pick one.'}</p></div>`;
   }
   const o = node.options.find((x) => x.id === mine);

@@ -151,9 +151,9 @@ After the session: `npm run destroy:game`.
 | **Lobby** | Students scan the QR code. Seats (Member / Front door / Network / Core) assign automatically. **Shuffle seats** if you want. Toggle **Member Lookup** on if you're running the honeypot. |
 | **1 · Route It** | Click **Start transaction 1**. The phone holding the active seat gets the decision; everyone else sees where the transaction is. Wrong answers show feedback on the TV and that phone, and the student retries for no points. Use **Next transaction ▶** to advance. Transaction 5 cuts the branch connection, which sets up Module 2. |
 | **2 · Help Desk** | **Start scenario** → students lock in → **Reveal**. The room's most popular answer decides the next step, and ties go to the better answer. **Click any answer bar to override** before **Continue** if you want to steer the story. |
-| **3 · The Inbox** | **Open the inbox.** The TV grid shows progress only (●), not answers. **Reveal answers** scores everything (+100 per correct call, −50 per phishing link clicked), then step through each email with its clues. |
+| **3 · The Inbox** | **Open the inbox.** The TV grid shows progress only (●), not answers. **Reveal answers** scores all 10 emails (+100 per correct call, −50 per phishing link clicked), then step through each email with its clues. |
 | **Audit Log** | Shows job-task record views (Core seat, transactions 1, 3 and 4) next to any no-task views from Member Lookup, plus phishing-link clicks. Use the **Anonymize** toggle if you'd rather show "Employee #2" than names. |
-| **Podium** | Final standings. |
+| **Podium** | Final standings. **📄 Session report** opens a printable report (standings, the Inbox email by email, the full answer log with right/wrong for every attempt, and the audit log). **🏆 Winner certificate** prints a landscape certificate for the top scorer (one each if tied). Click **Save as PDF** and choose *Save as PDF* in the print window, with *Headers and footers* off. The report is also on the Audit Log screen. |
 
 You can jump to any module from the top tabs at any time. The × next to a player's name removes them. **New session** wipes scores and the audit log, so it asks for confirmation first.
 

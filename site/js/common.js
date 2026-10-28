@@ -18,6 +18,23 @@ export function newId() {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 }
 
+// Answer order for a question. Seeded by the question's id, so the TV and every phone
+// show the same order (A–D letters match) without sending it over the wire.
+export function shuffled(seed, arr) {
+  let h = 2166136261;
+  for (const c of String(seed)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  const rand = () => {
+    h = Math.imul(h ^ (h >>> 15), h | 1) ^ (h + Math.imul(h ^ (h >>> 7), h | 61));
+    return ((h ^ (h >>> 14)) >>> 0) / 4294967296;
+  };
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 export const chUp = (code) => `/game/${code}/up`;
 export const chDown = (code) => `/game/${code}/down`;
 

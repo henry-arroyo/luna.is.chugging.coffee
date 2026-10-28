@@ -198,7 +198,7 @@ with sync_playwright() as pw:
                 shot(p, "17-phone-email-inspect")
             verdict = e["verdict"] if random.random() < 0.8 else ("legit" if e["verdict"] == "phish" else "phish")
             p.locator(f"button.v.{verdict}").click()
-    host.wait_for_function("() => Object.values(window.__socuHost.state.m3.marks).every(m => Object.keys(m).length === 8) && Object.keys(window.__socuHost.state.m3.marks).length === 4")
+    host.wait_for_function("() => Object.values(window.__socuHost.state.m3.marks).every(m => Object.keys(m).length === " + str(len(content["em"])) + ") && Object.keys(window.__socuHost.state.m3.marks).length === 4")
     shot(host, "18-host-m3-progress")
     host.once("dialog", lambda d: d.accept())
     click(host, "button[data-act=m3reveal]")
@@ -219,6 +219,26 @@ with sync_playwright() as pw:
     converge(host, phones, "podium")
     shot(host, "23-host-podium")
     shot(phones[0], "24-phone-podium")
+
+    # ── Session report + certificate (opened from the podium, as the host would)
+    h = hs(host)
+    for pid in h["order"]:
+        logged = sum(a["pts"] for a in h["answers"] if a["pid"] == pid)
+        assert logged == h["players"][pid]["score"], f"answer log points {logged} != score {h['players'][pid]['score']}"
+    with hostctx.expect_page() as rp:
+        click(host, "button[data-act=report]")
+    report = rp.value
+    report.on("pageerror", lambda e: errors.append(f"report: {e}"))
+    report.wait_for_function("() => window.__socuReport && window.__socuReport.ready")
+    report.wait_for_selector(".cert-name")
+    n_ans = report.locator("table.r-log").first.locator("tbody tr").count()
+    print("report: answer rows (Route It):", n_ans, "| certificates:", report.locator(".cert").count())
+    assert report.locator(".r-results tbody tr").count() == 4
+    report.emulate_media(media="print")
+    report.pdf(path=os.path.join(SHOTS, "session-report.pdf"), prefer_css_page_size=True, print_background=True)
+    report.emulate_media(media="screen")
+    shot(report, "25-report")
+    report.close()
 
     h = hs(host)
     kinds = [a["kind"] for a in h["audit"]]
