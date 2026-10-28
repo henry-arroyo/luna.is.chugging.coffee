@@ -156,7 +156,9 @@ That creates a new API and a fresh 72-hour key. Then open `host.html` on your co
 
 After the session: `npm run destroy:game`.
 
-**Full teardown, if you ever want everything gone:** `npm run destroy:all`. The CloudFront domain will be different on the next deploy, so you'd update the `luna.is` CNAME. The ACM validation record usually stays the same for the same domain and account; check `describe-certificate` again to confirm.
+**Full teardown, if you ever want everything gone:** `npm run destroy:all`. Before deploying the Site stack again, **delete the `luna.is` CNAME** in Cloudflare and give it about 5 minutes: CloudFront refuses to attach `luna.is.chugging.coffee` to a new distribution while DNS still points at the old one. Once the Site stack outputs the new `CloudFrontDomain`, add the CNAME back with that value. The ACM validation record stays the same for the same domain and account (it did on the October 2026 rebuild), so leave it in place.
+
+The host password isn't part of any stack, so it survives a full teardown.
 
 ---
 

@@ -68,8 +68,8 @@ Resources:
         Version: '2012-10-17'
         Statement:
           # AppSync, CloudFront and ACM: full control only of resources tagged project=mcfcu-socu-training
-          # (CDK tags everything in the app), and creating them only with that tag. So a deploy can't
-          # change or delete another project's APIs, distributions or certificates in this account.
+          # (CDK tags everything in the app). So a deploy can't change or delete another project's APIs,
+          # distributions or certificates in this account.
           - Sid: ProjectResources
             Effect: Allow
             Action: [appsync:*, cloudfront:*, acm:*]
@@ -79,21 +79,29 @@ Resources:
               - !Sub arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/*
             Condition:
               StringEquals: { aws:ResourceTag/project: mcfcu-socu-training }
-          - Sid: CreateTagged
+          # Creating can't touch anything that already exists. CloudFormation creates some of these
+          # untagged and tags them right after (ACM certificates, at least), so creates aren't tag-gated.
+          - Sid: Create
             Effect: Allow
             Action:
               - appsync:CreateApi
               - appsync:CreateChannelNamespace
-              - appsync:TagResource
               - cloudfront:CreateDistribution
-              - cloudfront:TagResource
               - acm:RequestCertificate
-              - acm:AddTagsToCertificate
+            Resource: '*'
+            Condition:
+              StringEquals: { aws:RequestedRegion: us-east-1 }
+          # Tagging a resource as this project only while it has no project tag yet (a fresh create),
+          # so a deploy can't claim another project's tagged resource by re-tagging it.
+          - Sid: TagNewResources
+            Effect: Allow
+            Action: [appsync:TagResource, cloudfront:TagResource, acm:AddTagsToCertificate]
             Resource: '*'
             Condition:
               StringEquals:
                 aws:RequestedRegion: us-east-1
                 aws:RequestTag/project: mcfcu-socu-training
+              'Null': { aws:ResourceTag/project: 'true' }
           # IAM can't scope these by tag or name: AppSync API keys, CloudFront origin access controls and
           # response-headers policies. Plus read-only lookups.
           - Sid: Untaggable
