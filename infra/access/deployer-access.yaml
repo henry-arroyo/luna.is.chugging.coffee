@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SOCU training game - keyless deploy access. Deploy once with an admin console login
+  (see setup-access.sh). Creates the scoped CloudFormation execution policy used by the
+  "socugame" CDK bootstrap, and the deployer role that Claude Code assumes to run cdk deploy.
+
+Parameters:
+  Qualifier:
+    Type: String
+    Default: socugame
+    Description: CDK bootstrap qualifier. Must match cdk.json.
+
+Resources:
+  # What CloudFormation itself may do when deploying the SocuGame-* stacks.
+  # Passed to `cdk bootstrap --cloudformation-execution-policies`, replacing the default AdministratorAccess.
+  ExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: socu-cdk-execution
+      Description: SOCU game - CloudFormation execution permissions (us-east-1, SocuGame-* only)
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AppServices
+            Effect: Allow
+            Action:
+              - acm:*
+              - appsync:*
+              - cloudfront:*
+              - logs:*
+            Resource: '*'
+            Condition:
+              StringEquals: { aws:RequestedRegion: us-east-1 }
+          - Sid: SiteBucket
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - arn:aws:s3:::socugame-*
+              - arn:aws:s3:::socugame-*/*
+            Condition:
+              StringEquals: { aws:RequestedRegion: us-east-1 }
+          - Sid: ReadCdkAssets
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetObjectVersion]
+            Resource: !Sub arn:aws:s3:::cdk-${Qualifier}-assets-${AWS::AccountId}-us-east-1/*
+          - Sid: StackFunctions
+            Effect: Allow
+            Action: lambda:*
+            Resource:
+              - !Sub arn:aws:lambda:us-east-1:${AWS::AccountId}:function:SocuGame-*
+          - Sid: StackLayers
+            Effect: Allow
+            Action: [lambda:PublishLayerVersion, lambda:DeleteLayerVersion, lambda:GetLayerVersion, lambda:ListLayerVersions]
+            Resource:
+              - !Sub arn:aws:lambda:us-east-1:${AWS::AccountId}:layer:*
+          - Sid: StackRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Cert-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Site-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Game-*
+          - Sid: OnlyTheseManagedPolicies
+            Effect: Allow
+            Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Site-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Game-*
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+                  - arn:aws:iam::aws:policy/service-role/AWSAppSyncPushToCloudWatchLogs
+          - Sid: PassStackRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Site-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/SocuGame-Game-*
+            Condition:
+              StringEquals:
+                iam:PassedToService: [lambda.amazonaws.com, appsync.amazonaws.com]
+          - Sid: BootstrapVersion
+            Effect: Allow
+            Action: [ssm:GetParameter, ssm:GetParameters]
+            Resource: !Sub arn:aws:ssm:us-east-1:${AWS::AccountId}:parameter/cdk-bootstrap/${Qualifier}/*
+
+  # The identity Claude Code uses. It can only assume this app's CDK bootstrap roles
+  # (which then act through the execution policy above), plus read-only status checks.
+  DeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: socu-claude-deployer
+      Description: SOCU game - assumed by Claude Code to run cdk deploy/destroy for SocuGame-* stacks
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: socu-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: UseCdkBootstrapRoles
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/cdk-${Qualifier}-*
+              - Sid: ReadStatus
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                  - acm:ListCertificates
+                  - acm:DescribeCertificate
+                  - cloudfront:GetDistribution
+                  - cloudfront:ListDistributions
+                  - cloudfront:GetInvalidation
+                  - appsync:GetApi
+                  - appsync:ListApis
+                  - appsync:ListChannelNamespaces
+                  - logs:DescribeLogGroups
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                Resource: '*'
+                Condition:
+                  StringEquals: { aws:RequestedRegion: us-east-1 }
+      Tags:
+        - { Key: project, Value: mcfcu-socu-training }
+
+Outputs:
+  ExecutionPolicyArn:
+    Value: !Ref ExecutionPolicy
+  DeployerRoleArn:
+    Value: !GetAtt DeployerRole.Arn

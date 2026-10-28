@@ -1,0 +1,23 @@
+{
+  "name": "socu-game-infra",
+  "version": "1.0.0",
+  "scripts": {
+    "synth": "cdk synth",
+    "deploy:cert": "cdk deploy SocuGame-Cert",
+    "deploy:site": "cdk deploy SocuGame-Site",
+    "deploy:game": "cdk deploy SocuGame-Game",
+    "destroy:game": "cdk destroy SocuGame-Game --force",
+    "destroy:all": "cdk destroy --all"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.275.0",
+    "constructs": "^10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "aws-cdk": "^2.1146.1",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.6"
+  },
+  "private": true
+}

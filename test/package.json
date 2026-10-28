@@ -1,0 +1,11 @@
+{
+  "name": "socu-game-test",
+  "private": true,
+  "scripts": {
+    "mock": "node mock-appsync.js 8787",
+    "e2e": "python3 e2e.py http://localhost:8787"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}
