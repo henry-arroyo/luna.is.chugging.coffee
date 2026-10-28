@@ -1,11 +1,12 @@
 // PLAYER (phone). Renders the host's latest snapshot and sends intents. Never decides outcomes.
-import { TRANSACTIONS, SCENARIOS, EMAILS, LOOKUP_MEMBERS, SEAT_ICON } from './content.js';
+import { TRANSACTIONS, SCENARIOS, EMAILS, LOOKUP_MEMBERS, SEATS, SEAT_ICON } from './content.js';
 import { loadConfig, createTransport } from './transport.js';
 import { esc, $, newId, chUp, chDown, store, cleanName, shuffled } from './common.js';
 
 const app = $('#app');
 let T = null;
-let me = { pid: null, name: '', code: '' };
+// pid is private: it's what the TV accepts actions from. pub is how this phone appears in the broadcast state.
+let me = { pid: null, pub: null, name: '', code: '' };
 let S = null; // latest public state
 let V = -1;
 let joined = false;
@@ -21,9 +22,10 @@ const L = {
   modal: null,
 };
 
-const send = (obj) => T.publish(chUp(me.code), { ...obj, pid: me.pid });
+const send = (obj) => T.publish(chUp(me.code), { ...obj, pid: me.pid, pub: me.pub });
 const act = (a) => send({ t: 'act', a });
-const meP = () => S?.players.find((p) => p.pid === me.pid);
+const meP = () => S?.players.find((p) => p.id === me.pub);
+const num = (n) => (Number.isFinite(n) ? n : 0);
 
 function localKey() {
   return `socu-local-${me.code}-${me.pid}`;
@@ -66,7 +68,7 @@ function join(code, name) {
   }
   me.code = code;
   me.name = name;
-  store('socu-player', { code, name, pid: me.pid });
+  store('socu-player', { code, name, pid: me.pid, pub: me.pub });
   Object.assign(L, store(localKey()) || {});
   joined = true;
   T.subscribe(chDown(code), onDown, () => send({ t: 'join', name: me.name }));
@@ -74,9 +76,30 @@ function join(code, name) {
   setTimeout(() => !S && send({ t: 'join', name: me.name }), 2500);
 }
 
+// Anyone with the API key can publish on the down channel, not just the TV.
+// Only render a state whose every field points at real content and has the right type.
+const PHASE_LIST = ['lobby', 'm1', 'm2', 'm3', 'audit', 'podium'];
+const isInt = (n, max) => Number.isInteger(n) && n >= 0 && n < max;
+function validState(s) {
+  if (!s || typeof s !== 'object' || !PHASE_LIST.includes(s.phase)) return false;
+  if (!s.settings || typeof s.settings !== 'object') return false;
+  if (!Array.isArray(s.players) || !s.players.every((p) => p && typeof p.id === 'string' && typeof p.name === 'string'
+    && Number.isFinite(p.score) && Array.isArray(p.seats) && p.seats.every((x) => SEATS.includes(x)))) return false;
+  const { m1, m2, m3 } = s;
+  if (!m1 || !isInt(m1.txIdx, TRANSACTIONS.length) || !isInt(m1.step, TRANSACTIONS[m1.txIdx].steps.length)) return false;
+  if (m1.feedback && (!isInt(m1.feedback.step, TRANSACTIONS[m1.txIdx].steps.length)
+    || !TRANSACTIONS[m1.txIdx].steps[m1.feedback.step].options.some((o) => o.id === m1.feedback.opt))) return false;
+  if (!m2 || !isInt(m2.scIdx, SCENARIOS.length)) return false;
+  const sc = SCENARIOS[m2.scIdx];
+  if (m2.node !== null && !Object.hasOwn(sc.nodes, m2.node)) return false;
+  if (['voting', 'revealed'].includes(m2.status) && m2.node === null) return false;
+  if (m2.status === 'revealed' && !sc.nodes[m2.node].options.some((o) => o.id === m2.reveal?.choice)) return false;
+  return !!m3 && typeof m3.status === 'string';
+}
+
 function onDown(msg) {
   if (!msg || msg.t !== 'state' || typeof msg.v !== 'number') return;
-  if (msg.s?.code !== me.code) return;
+  if (msg.s?.code !== me.code || !validState(msg.s)) return;
   if (msg.v <= V && S) return;
   V = msg.v;
   const prevPhase = S?.phase;
@@ -99,7 +122,7 @@ function header() {
   return `<header class="phead">
       <img src="/img/mark.png" alt="" class="mark">
       <div class="who"><b>${esc(me.name)}</b><small>Game ${esc(me.code)}</small></div>
-      <div class="score"><small>Score</small><b>${p ? p.score : 0}</b></div>
+      <div class="score"><small>Score</small><b>${num(p?.score)}</b></div>
     </header>`;
 }
 
@@ -147,8 +170,8 @@ function vTV() {
 
 function vPodium() {
   const ranked = [...S.players].sort((a, b) => b.score - a.score);
-  const rank = ranked.findIndex((p) => p.pid === me.pid) + 1;
-  return `<div class="card hero center"><p class="eyebrow">Final standings</p><h2>#${rank} of ${ranked.length}</h2><p class="bigscore">${meP().score} pts</p><p class="muted">Mahalo for playing!</p></div>`;
+  const rank = ranked.findIndex((p) => p.id === me.pub) + 1;
+  return `<div class="card hero center"><p class="eyebrow">Final standings</p><h2>#${rank} of ${ranked.length}</h2><p class="bigscore">${num(meP().score)} pts</p><p class="muted">Mahalo for playing!</p></div>`;
 }
 
 // Module 1
@@ -164,8 +187,8 @@ function vM1() {
   const st = tx.steps[m.step];
   const mine = p.seats.includes(st.seat);
   const fb = m.feedback;
-  const myWrong = fb && fb.pid === me.pid && fb.step === m.step && !fb.ok;
-  const lastRight = fb && fb.pid === me.pid && fb.ok && fb.step === m.step - 1;
+  const myWrong = fb && fb.id === me.pub && fb.step === m.step && !fb.ok;
+  const lastRight = fb && fb.id === me.pub && fb.ok && fb.step === m.step - 1;
   if (mine) {
     const wrongOpt = myWrong ? st.options.find((o) => o.id === fb.opt) : null;
     return `<div class="card yourturn"><p class="eyebrow">${SEAT_ICON[st.seat]} You are: ${esc(tx.labels[st.seat])}</p>
@@ -343,6 +366,7 @@ async function boot() {
   });
   const saved = store('socu-player') || {};
   me.pid = saved.pid || newId();
+  me.pub = saved.pub || newId();
   me.name = saved.name || '';
   const qs = new URLSearchParams(location.search);
   const code = (qs.get('code') || '').toUpperCase();

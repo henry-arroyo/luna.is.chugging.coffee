@@ -11,6 +11,12 @@ os.makedirs(SHOTS, exist_ok=True)
 NAMES = ["Kai", "Leilani", "Makoa", "Noe"]
 random.seed(7)
 errors = []
+vulns = []  # attacks that got through (collected, so one run reports every hole)
+
+
+def check(ok, msg):
+    if not ok:
+        vulns.append(msg)
 # Against the local mock, sockets are killed server-side via /__kill. Against a real deployment,
 # every page records its WebSockets and the test closes them abruptly (what a Wi-Fi drop looks like).
 MOCK = BASE.startswith("http://localhost") or BASE.startswith("http://127.")
@@ -215,6 +221,12 @@ with sync_playwright() as pw:
     host.locator("footer label.toggle").click()
     time.sleep(0.3)
     shot(host, "22-host-audit-anon")
+    # Phones never get the audit log (it carries real names, even with Anonymize on),
+    # and the broadcast never carries a private player id.
+    pids = list(hs(host)["players"].keys())
+    s = ps(phones[0])
+    check(not s.get("audit"), "audit log (with real names) broadcast to phones")
+    check(not any(pid in json.dumps(s) for pid in pids), "private player ids in broadcast state")
     click(host, "button[data-act=phase][data-v=podium]")
     converge(host, phones, "podium")
     shot(host, "23-host-podium")
@@ -248,9 +260,76 @@ with sync_playwright() as pw:
     assert kinds.count("task") == 3, "core task accesses should be logged (tx1, tx3, tx4)"
     assert kinds.count("click") == 1, "phish click should be logged once"
     noe = [p for p in h["order"] if h["players"][p]["name"] == "Noe"][0]
+
+    # ── Attacks. The API key is public, so a student can publish on both channels.
+    # The rogue page borrows the site's own transport, exactly as someone in dev tools could.
+    rogue = browser.new_context().new_page()
+    rogue.on("pageerror", lambda e: errors.append(f"rogue: {e}"))
+    rogue.goto(f"{BASE}/")
+    rogue.evaluate("""async (code) => {
+      const t = await import('/js/transport.js');
+      const c = await import('/js/common.js');
+      const T = t.createTransport(await t.loadConfig());
+      await new Promise((r) => T.onStatus((st) => st === 'online' && r()));
+      window.__rogue = { up: (m) => T.publish(c.chUp(code), m), down: (m) => T.publish(c.chDown(code), m), newId: c.newId };
+    }""", code)
+    member = rogue.evaluate("async () => (await import('/js/content.js')).LOOKUP_MEMBERS[0].id")
+    audit_before = len(hs(host)["audit"])
+
+    # 1. A fake TV broadcast with HTML in the scores and a version far ahead of the TV's.
+    fake = ps(phones[0])
+    for p in fake["players"]:
+        p["score"] = '<b id="pwn">pwned</b>'
+    rogue.evaluate("(s) => window.__rogue.down({ t: 'state', v: 1e15, s })", fake)
+    time.sleep(1)
+    check(all(p.locator("#pwn").count() == 0 for p in phones), "fake broadcast injected HTML on phones")
+    click(host, "button[data-act=phase][data-v=audit]")
+    try:
+        converge(host, phones, "after fake broadcast")
+    except AssertionError:
+        vulns.append("phones stopped following the real TV after a fake broadcast")
+    click(host, "button[data-act=phase][data-v=podium]")
+
+    # 2. Acting as a classmate using the id the broadcast shows for them.
+    first = ps(phones[1])["players"][0]
+    victim = first.get("id") or first.get("pid")  # "pid" is what builds before public ids exposed
+    rogue.evaluate("([id, member]) => { window.__rogue.up({ t: 'act', pid: id, pub: id, a: { k: 'lookup', member } });"
+                   " window.__rogue.up({ t: 'act', pid: id, a: { k: 'browse' } }) }", [victim, member])
+
+    # 3. "__proto__" as a player id (prototype pollution on the TV).
+    rogue.evaluate("""(member) => { const r = window.__rogue;
+      r.up({ t: 'join', pid: '__proto__', pub: r.newId(), name: 'Kalani' });
+      r.up({ t: 'act', pid: '__proto__', a: { k: 'lookup', member } });
+      r.up({ t: 'act', pid: '__proto__', a: { k: 'browse' } }); }""", member)
+    time.sleep(1)
+    h = hs(host)
+    forged = h["audit"][audit_before:]
+    check(not forged, f"forged audit entries: {[(a['name'], a['action']) for a in forged]}")
+    check(host.evaluate("() => Object.keys(Object.prototype).length === 0 && ({}).name === undefined"), "Object.prototype polluted on the TV")
+    check(len(h["order"]) == 4, "rogue messages added a player")
+
+    # 4. Heartbeat flood from one joined player: broadcasts are coalesced, not one per message.
+    rogue.evaluate("() => { const r = window.__rogue; r.flood = { pid: r.newId(), pub: r.newId() }; r.up({ t: 'join', name: 'Flood', ...r.flood }) }")
+    host.wait_for_function(f"() => window.__socuHost.state.order.length === {len(h['order']) + 1}")
+    time.sleep(0.5)
+    v0 = hs(host)["v"]
+    rogue.evaluate("() => { const r = window.__rogue; for (let i = 0; i < 200; i++) r.up({ t: 'hello', ...r.flood }) }")
+    time.sleep(2)
+    flood_bcasts = hs(host)["v"] - v0
+    print("broadcasts during a 200-message hello flood:", flood_bcasts)
+    check(flood_bcasts <= 5, f"hello flood caused {flood_bcasts} broadcasts")
+
+    # 5. Join flood: the TV stops adding players at its cap.
+    rogue.evaluate("() => { const r = window.__rogue; for (let i = 0; i < 70; i++) r.up({ t: 'join', name: 'Bot', pid: r.newId(), pub: r.newId() }) }")
+    time.sleep(2)
+    n = len(hs(host)["order"])
+    print("players after a 70-join flood:", n)
+    # AppSync drops part of a burst this fast from one connection, so live runs may not reach the cap.
+    check(n == 60 if MOCK else n <= 60, f"join cap not enforced: {n} players")
+    print("attacks that got through:", vulns or "none")
     if MOCK:
         print("stats:", urllib.request.urlopen(f"{BASE}/__stats").read().decode())
     browser.close()
 
 print("page errors:", errors or "none")
-sys.exit(1 if errors else 0)
+sys.exit(1 if errors or vulns else 0)

@@ -15,6 +15,9 @@ const PHASES = [
 ];
 const ONLINE_MS = 40000;
 const KEY = 'socu-host-session';
+const MAX_PLAYERS = 60;
+// Player ids are newId() output. Checking the format also keeps ids like "__proto__" out of the state objects.
+const ID_RE = /^[0-9a-f]{18}$/;
 
 let S = null; // authoritative state
 let T = null; // transport
@@ -69,38 +72,37 @@ function logAnswer(pid, mod, item, question, choice, result, pts) {
 }
 
 // ───────────────────────── broadcast ─────────────────────────
+// Everything here is readable by anyone with the API key, so players appear only by their public id (pub).
+// The private pid is what the TV accepts actions from, so it never leaves the TV.
 function publicState() {
-  const anon = anonNames();
+  const pub = (pid) => P(pid)?.pub || null;
+  const fb = S.m1.feedback;
   return {
     code: S.code,
     phase: S.phase,
     settings: { honeypot: S.settings.honeypot },
-    players: S.order.map((pid) => ({ pid, name: P(pid).name, score: P(pid).score, seats: seatsOf(pid), online: online(pid) })),
+    players: S.order.map((pid) => ({ id: pub(pid), name: P(pid).name, score: P(pid).score, seats: seatsOf(pid), online: online(pid) })),
     m1: {
       txIdx: S.m1.txIdx,
       status: S.m1.status,
       step: S.m1.step,
-      feedback: S.m1.feedback,
+      feedback: fb && { id: pub(fb.pid), step: fb.step, opt: fb.opt, ok: fb.ok, at: fb.at },
       outcome: S.m1.status === 'result',
-      log: S.m1.log,
+      log: S.m1.log.map(({ pid, ...e }) => ({ ...e, id: pub(pid) })),
     },
     m2: {
       scIdx: S.m2.scIdx,
       node: S.m2.node,
       round: S.m2.round || 0,
       status: S.m2.status,
-      voted: Object.keys(S.m2.votes),
-      reveal: S.m2.reveal,
+      voted: Object.keys(S.m2.votes).map(pub),
+      reveal: S.m2.reveal && { counts: S.m2.reveal.counts, choice: S.m2.reveal.choice }, // pts is keyed by private id
     },
     m3: {
       status: S.m3.status,
       revealIdx: S.m3.revealIdx,
-      progress: Object.fromEntries(S.order.map((pid) => [pid, Object.keys(S.m3.marks[pid] || {}).length])),
+      progress: Object.fromEntries(S.order.map((pid) => [pub(pid), Object.keys(S.m3.marks[pid] || {}).length])),
     },
-    audit:
-      S.phase === 'audit'
-        ? S.audit.map((a) => ({ ...a, who: S.settings.anonymize ? anon[a.pid] : P(a.pid)?.name || '?' }))
-        : null,
   };
 }
 
@@ -110,28 +112,36 @@ function anonNames() {
   return m;
 }
 
+// Changes within 35 ms go out as one broadcast. The timer is never pushed back,
+// so a flood of messages can't hold broadcasts off indefinitely.
 function broadcast(now = false) {
-  clearTimeout(bTimer);
   const go = () => {
+    clearTimeout(bTimer);
+    bTimer = null;
     S.v++;
     T.publish(chDown(S.code), { t: 'state', v: S.v, s: publicState() });
     store(KEY, S);
   };
   if (now) go();
-  else bTimer = setTimeout(go, 35);
+  else if (!bTimer) bTimer = setTimeout(go, 35);
   render();
 }
 
 // ───────────────────────── inbound ─────────────────────────
 function onUp(msg) {
   if (!msg || typeof msg !== 'object') return;
-  const pid = typeof msg.pid === 'string' ? msg.pid.slice(0, 40) : null;
+  const pid = typeof msg.pid === 'string' && ID_RE.test(msg.pid) ? msg.pid : null;
   if (!pid) return;
+  const pub = typeof msg.pub === 'string' && ID_RE.test(msg.pub) ? msg.pub : null;
+  const pubFree = pub && pub !== pid && !S.order.some((x) => x === pub || P(x).pub === pub);
+  // Sessions saved before public ids existed: adopt the phone's pub the first time it sends one.
+  if (P(pid) && !P(pid).pub && pubFree) P(pid).pub = pub;
 
   if (msg.t === 'join') {
     const name = cleanName(msg.name) || 'Player';
     if (!P(pid)) {
-      S.players[pid] = { name, score: 0, mod: {}, lastSeen: Date.now() };
+      if (!pubFree || S.order.length >= MAX_PLAYERS) return;
+      S.players[pid] = { name, pub, score: 0, mod: {}, lastSeen: Date.now() };
       S.order.push(pid);
       audit(pid, 'join', 'Joined the session', '');
       if (S.phase === 'lobby') assignSeats();
@@ -140,13 +150,16 @@ function onUp(msg) {
       P(pid).name = name;
       P(pid).lastSeen = Date.now();
     }
-    return broadcast(true);
+    return broadcast();
   }
 
   if (!P(pid)) return; // unknown player: ignore (they'll re-join)
-  P(pid).lastSeen = Date.now();
+  const now = Date.now();
+  const lastSeen = P(pid).lastSeen || 0;
+  P(pid).lastSeen = now;
 
-  if (msg.t === 'hello') return broadcast(true);
+  // Heartbeats arrive every 12 s. Anything much faster doesn't earn its own broadcast.
+  if (msg.t === 'hello') return now - lastSeen > 2000 ? broadcast() : undefined;
   if (msg.t !== 'act' || !msg.a || typeof msg.a !== 'object') return;
   const a = msg.a;
 

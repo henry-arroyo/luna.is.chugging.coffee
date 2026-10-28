@@ -3,7 +3,8 @@
   "context": {
     "domainName": "luna.is.chugging.coffee",
     "apiKeyHours": 72,
-    "@aws-cdk/core:bootstrapQualifier": "socugame"
+    "@aws-cdk/core:bootstrapQualifier": "socugame",
+    "@aws-cdk/core:permissionsBoundary": { "name": "socu-role-boundary" }
   },
   "toolkitStackName": "CDKToolkit-socugame"
 }

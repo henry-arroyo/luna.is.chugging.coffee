@@ -10,7 +10,9 @@ export async function loadConfig() {
     const r = await fetch('/runtime/config.json', { cache: 'no-store' });
     if (!r.ok) return null;
     const cfg = await r.json();
-    if (qs.get('realtimeUrl')) cfg.realtimeUrl = qs.get('realtimeUrl'); // test harness only
+    // Test harness only. On the real site a link could otherwise point phones at someone else's server.
+    const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+    if (local && qs.get('realtimeUrl')) cfg.realtimeUrl = qs.get('realtimeUrl');
     return cfg;
   } catch {
     return null;

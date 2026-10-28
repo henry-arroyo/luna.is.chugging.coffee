@@ -53,7 +53,8 @@ That script deploys `socu-claude-access` ([access/deployer-access.yaml](infra/ac
 | Created | Purpose |
 |---|---|
 | Role `socu-claude-deployer` | Assumed for deploys. Can only assume the `cdk-socugame-*` bootstrap roles, plus read-only status checks. |
-| Policy `socu-cdk-execution` | What CloudFormation may do: us-east-1 only; S3 `socugame-*`, CloudFront, ACM, AppSync, Lambda `SocuGame-*`, Logs; IAM only on `SocuGame-*` roles, with two allowed AWS-managed policies. |
+| Policy `socu-cdk-execution` | What CloudFormation may do: us-east-1 only; S3 `socugame-*`, CloudFront, ACM, AppSync, Lambda `SocuGame-*`, the project's own log groups; IAM only on `SocuGame-*` roles, and only roles that carry the boundary below. |
+| Policy `socu-role-boundary` | Permissions boundary on every role the stacks create (set through `cdk.json`). Caps them at the site bucket, CloudFront invalidations and the project's log groups, so a stack can't create an admin role or one another account can assume. |
 | Stack `CDKToolkit-socugame` | CDK bootstrap, using the policy above instead of AdministratorAccess. |
 
 Every deploy command below runs through the deployer role:
@@ -177,7 +178,12 @@ The mock implements the documented AppSync Events WebSocket protocol and runs th
 
 ## Security notes
 
-- **The API key is public by design.** It sits in `config.json` so phones can connect. Someone with it could publish junk into a training game. They could not reach anything else, and no member data exists anywhere in this system. Mitigations:
+- **The API key is public by design.** It sits in `config.json` so phones can connect. Anyone with it can publish on a game's channels, so neither side trusts the other blindly. They could not reach anything else, and no member data exists anywhere in this system. Mitigations:
+  - Each phone has a private id, which the TV accepts actions from, and a separate public id, which is how the phone appears in broadcasts. Private ids never leave the TV, so nobody can answer or log a lookup as a classmate.
+  - Phones only render a broadcast whose fields are the right types and point at real content, and never insert any of it as HTML. A forged broadcast can't add links or markup to a phone.
+  - The audit log is never broadcast. Phones don't need it, and it carries real names even with **Anonymize** on.
+  - The TV caps a game at 60 players and coalesces broadcasts, so floods of joins or heartbeats can't swamp it.
+  - What's left: a well-formed forged broadcast with a high version number can put phones on the wrong screen or stop them updating until they refresh. Preventing that would need the TV to sign its broadcasts.
   - The key expires in 72 hours, and you destroy the stack after each session.
   - Channels are scoped per 4-letter session code.
   - The `onPublish` handler drops anything that isn't a small, well-formed game message on `/game/<code>/up|down`.
