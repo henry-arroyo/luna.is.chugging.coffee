@@ -61,7 +61,10 @@ code { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; word-br
 .toggle.inline { display: inline-flex; margin-right: 1em; }
 
 /* ═════════════════════════ HOST (TV) ═════════════════════════ */
-body.host { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; font-size: clamp(15px, 1.05vw, 22px); }
+/* The host screen scales with the window, so a TV looks the same at any Windows display scaling
+   (a 1920px TV at 150% gives the page a 1280px window). The 12px floor is below every width it's
+   used at; under 1100px the layout stacks. */
+body.host { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; font-size: clamp(12px, 1.05vw, 22px); }
 .topbar { background: var(--green); display: flex; align-items: center; gap: 1.5em; padding: .6em 1.4em; }
 .toplogo { height: 2.4em; }
 .tabs { display: flex; gap: .3em; flex: 1; justify-content: center; flex-wrap: wrap; }
@@ -115,7 +118,9 @@ body.host { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; ove
 .join-card .url { font-size: 1.15em; font-weight: 600; color: var(--mist); word-break: break-all; }
 .code-label { margin: 1.2em 0 .3em; color: var(--sage); font-size: .85em; text-transform: uppercase; letter-spacing: .1em; }
 .bigcode { display: flex; gap: .2em; margin: 0; }
-.bigcode span { font-family: var(--head); font-weight: 800; font-size: 3.2em; background: var(--sun); color: var(--green); width: 1.15em; text-align: center; border-radius: 12px; line-height: 1.25; }
+/* Safety net: the tiles also cap at the space the card actually has, so the code never spills out. */
+.join-text { container-type: inline-size; min-width: 0; }
+.bigcode span { font-family: var(--head); font-weight: 800; font-size: min(3.2em, 20.5cqi); background: var(--sun); color: var(--green); width: 1.15em; text-align: center; border-radius: 12px; line-height: 1.25; }
 .lobby-right h2 { font-size: 1.2em; margin-top: .3em; }
 .chips { display: flex; flex-wrap: wrap; gap: .5em; margin-bottom: 1.5em; }
 .chip { background: #fff; border: 2px solid var(--leaf); color: var(--green); font-weight: 700; padding: .35em .9em; border-radius: 999px; animation: pop .3s ease-out; }

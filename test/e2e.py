@@ -71,7 +71,9 @@ def click(page, sel):
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch()
-    hostctx = browser.new_context(viewport={"width": 1920, "height": 1080})
+    # HOST_VIEWPORT=1280x720 tests a TV at 150% Windows scaling (its window is 1280 CSS pixels wide).
+    hw, hh = (int(x) for x in os.environ.get("HOST_VIEWPORT", "1920x1080").split("x"))
+    hostctx = browser.new_context(viewport={"width": hw, "height": hh})
     hostctx.add_init_script(TRACK_WS)
     host = hostctx.new_page()
     host.on("pageerror", lambda e: errors.append(f"host: {e}"))
