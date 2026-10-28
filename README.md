@@ -22,7 +22,7 @@ A real-time, phone-based game for the SOCU systems and data security session. Th
 |---|---|---|
 | `SocuGame-Cert` | Persistent | ACM certificate for `luna.is.chugging.coffee` (us-east-1, DNS validated in Cloudflare) |
 | `SocuGame-Site` | Persistent | Private S3 bucket, CloudFront with Origin Access Control, security headers (CSP, HSTS, frame-deny, no-referrer) |
-| `SocuGame-Game` | **Ephemeral** | AppSync Events API, `game` channel namespace with an `onPublish` guard, API key (48 h), `runtime/config.json` |
+| `SocuGame-Game` | **Ephemeral** | AppSync Events API, `game` channel namespace with an `onPublish` guard, API key (72 h), `runtime/config.json` |
 
 Everything is in **us-east-1**, because CloudFront requires its certificate there and one region avoids cross-region references.
 
@@ -111,7 +111,7 @@ The CloudFront distribution takes several minutes to create. Note the `CloudFron
 npm run deploy:game
 ```
 
-This takes about a minute. The output shows the API key's approximate expiry, which is 48 hours from deploy. AppSync rounds expiry down to the hour.
+This takes about a minute. The output shows the API key's approximate expiry, which is 72 hours from deploy. AppSync rounds expiry down to the hour.
 
 ### 4. Test
 
@@ -136,7 +136,7 @@ This deletes the API and invalidates the key. The site stays up and shows **"Gam
 cd infra && npm run deploy:game
 ```
 
-That creates a new API and a fresh 48-hour key. Then open `host.html` on the conference room computer and test with your phone **from the conference room**. Branch guest Wi-Fi can block WebSockets. If it does, have students use cellular data.
+That creates a new API and a fresh 72-hour key. Then open `host.html` on the conference room computer and test with your phone **from the conference room**. Branch guest Wi-Fi can block WebSockets. If it does, have students use cellular data.
 
 After the session: `npm run destroy:game`.
 
@@ -178,7 +178,7 @@ The mock implements the documented AppSync Events WebSocket protocol and runs th
 ## Security notes
 
 - **The API key is public by design.** It sits in `config.json` so phones can connect. Someone with it could publish junk into a training game. They could not reach anything else, and no member data exists anywhere in this system. Mitigations:
-  - The key expires in 48 hours, and you destroy the stack after each session.
+  - The key expires in 72 hours, and you destroy the stack after each session.
   - Channels are scoped per 4-letter session code.
   - The `onPublish` handler drops anything that isn't a small, well-formed game message on `/game/<code>/up|down`.
 - **Students' data:** first name or nickname only. Nothing is stored server-side; AppSync Events relays and forgets. Game state lives only in the TV's browser.
